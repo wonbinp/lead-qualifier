@@ -1,0 +1,23 @@
+{
+  "name": "prospect-evaluator",
+  "version": "1.0.0",
+  "description": "Slack bot that evaluates inbound leads for MayI",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^0.26.4",
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@aws-sdk/credential-provider-node": "^3.972.17",
+    "@slack/bolt": "^4.1.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
