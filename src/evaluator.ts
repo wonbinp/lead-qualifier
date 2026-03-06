@@ -168,7 +168,19 @@ ${searchContext}`;
       };
     }
 
-    const parsed = JSON.parse(jsonMatch[0]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let parsed: any;
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
+      return {
+        recommendation: 'NEEDS_REVIEW',
+        totalScore: 0,
+        scores: [],
+        opinion: `AI 응답 JSON 파싱 실패: ${responseText.slice(0, 200)}`,
+      };
+    }
+
     const validRecommendations = ['RECOMMENDED', 'NOT_RECOMMENDED', 'NEEDS_REVIEW'] as const;
 
     if (!validRecommendations.includes(parsed.recommendation)) {

@@ -4,8 +4,23 @@ import { searchCompany } from './search.js';
 import { extractCompanyName, evaluateLead } from './evaluator.js';
 import { ScoreItem } from './types.js';
 
+const REQUIRED_ENV_VARS = [
+  'SLACK_BOT_TOKEN',
+  'SLACK_APP_TOKEN',
+  'GOOGLE_API_KEY',
+  'GOOGLE_CSE_ID',
+  'SLACK_CHANNEL_ID',
+  'SALES_GROUP_ID',
+] as const;
+
+const missing = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
+if (missing.length > 0) {
+  console.error(`Missing required environment variables: ${missing.join(', ')}`);
+  process.exit(1);
+}
+
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID!;
-const SALES_GROUP_ID = 'S01HAMKMUKE';
+const SALES_GROUP_ID = process.env.SALES_GROUP_ID!;
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -59,43 +74,51 @@ app.message(async ({ message, say }) => {
   const text = ('text' in message ? message.text : '') ?? '';
   if (!text.trim()) return;
 
-  console.log(`[${new Date().toISOString()}] New message detected`);
-
-  // Step 1: Extract company name using Claude
-  console.log('Extracting company name...');
-  const companyName = await extractCompanyName(text);
-  if (!companyName) {
-    console.log('Could not extract company name, skipping.');
-    return;
-  }
-  console.log(`Company: ${companyName}`);
-
-  // Step 2: Search for company info
-  console.log(`Searching for: ${companyName}`);
-  const searchResults = await searchCompany(companyName);
-  console.log(`Found ${searchResults.length} search results`);
-
-  // Step 3: Evaluate with Claude
-  console.log('Evaluating prospect with Claude...');
-  const evaluation = await evaluateLead(text, searchResults);
-  console.log(`Result: ${evaluation.recommendation} (${evaluation.totalScore}/5.0)`);
-
-  // Step 4: Post result as thread reply
-  let replyText = formatEvaluation(evaluation);
-
-  if (evaluation.recommendation === 'RECOMMENDED') {
-    replyText += `\n\n<!subteam^${SALES_GROUP_ID}> 아웃바운드 검토 부탁드립니다.`;
-  }
-
   const ts = ('ts' in message ? message.ts : undefined) as string | undefined;
   if (!ts) return;
 
-  await say({
-    text: replyText,
-    thread_ts: ts,
-  });
+  console.log(`[${new Date().toISOString()}] New message detected`);
 
-  console.log(`Posted evaluation to thread for ${companyName}`);
+  try {
+    // Step 1: Extract company name using Claude
+    console.log('Extracting company name...');
+    const companyName = await extractCompanyName(text);
+    if (!companyName) {
+      console.log('Could not extract company name, skipping.');
+      return;
+    }
+    console.log(`Company: ${companyName}`);
+
+    // Step 2: Search for company info
+    console.log(`Searching for: ${companyName}`);
+    const searchResults = await searchCompany(companyName);
+    console.log(`Found ${searchResults.length} search results`);
+
+    // Step 3: Evaluate with Claude
+    console.log('Evaluating prospect with Claude...');
+    const evaluation = await evaluateLead(text, searchResults);
+    console.log(`Result: ${evaluation.recommendation} (${evaluation.totalScore}/5.0)`);
+
+    // Step 4: Post result as thread reply
+    let replyText = formatEvaluation(evaluation);
+
+    if (evaluation.recommendation === 'RECOMMENDED') {
+      replyText += `\n\n<!subteam^${SALES_GROUP_ID}> 아웃바운드 검토 부탁드립니다.`;
+    }
+
+    await say({
+      text: replyText,
+      thread_ts: ts,
+    });
+
+    console.log(`Posted evaluation to thread for ${companyName}`);
+  } catch (error) {
+    console.error('Evaluation failed:', error);
+    await say({
+      text: ':warning: 프로스펙트 평가 중 오류가 발생했습니다. 수동 확인이 필요합니다.',
+      thread_ts: ts,
+    });
+  }
 });
 
 (async () => {
