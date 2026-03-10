@@ -14,6 +14,10 @@ async function fetchSearch(query: string): Promise<SearchResult[]> {
 
   try {
     const response = await fetch(url);
+    if (response.status === 429) {
+      console.error('Google Search API 일일 한도 초과');
+      throw new Error('GOOGLE_QUOTA_EXCEEDED');
+    }
     if (!response.ok) {
       console.error(`Google Search API error: ${response.status} ${response.statusText}`);
       return [];

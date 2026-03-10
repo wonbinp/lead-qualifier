@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import { App } from '@slack/bolt';
 import { searchCompany } from './search.js';
-import { extractCompanyName, evaluateLead } from './evaluator.js';
-import { ScoreItem } from './types.js';
+import { extractCompanyName, evaluateLead, summarizePastLeads } from './evaluator.js';
+import { searchPastLeads } from './history.js';
+import { ScoreItem, PastLead } from './types.js';
 
 const REQUIRED_ENV_VARS = [
   'SLACK_BOT_TOKEN',
@@ -56,7 +57,13 @@ function formatEvaluation(evaluation: ReturnType<typeof Object>): string {
   lines.push('');
   lines.push('*[항목별 평가]*');
 
-  for (const score of (evaluation.scores as ScoreItem[])) {
+  const SCORE_ORDER = ['매장 수', '업종 적합성', '대기업 여부', '브랜드 인지도', '업무 메일 여부', '의사결정권'];
+  const scores = (evaluation.scores as ScoreItem[]);
+  const sorted = SCORE_ORDER
+    .map((label) => scores.find((s) => s.label === label))
+    .filter((s): s is ScoreItem => s != null);
+
+  for (const score of sorted) {
     lines.push(`• ${score.label}: ${starsToEmoji(score.stars)} — ${score.reason}`);
   }
 
@@ -77,7 +84,7 @@ app.message(async ({ message, say }) => {
   const ts = ('ts' in message ? message.ts : undefined) as string | undefined;
   if (!ts) return;
 
-  console.log(`[${new Date().toISOString()}] New message detected`);
+  console.log(`[${new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}] New message detected`);
 
   try {
     // Step 1: Extract company name using Claude
@@ -89,10 +96,13 @@ app.message(async ({ message, say }) => {
     }
     console.log(`Company: ${companyName}`);
 
-    // Step 2: Search for company info
+    // Step 2: Search for company info + past leads
     console.log(`Searching for: ${companyName}`);
-    const searchResults = await searchCompany(companyName);
-    console.log(`Found ${searchResults.length} search results`);
+    const [searchResults, pastLeads] = await Promise.all([
+      searchCompany(companyName),
+      searchPastLeads(companyName, ts),
+    ]);
+    console.log(`Found ${searchResults.length} search results, ${pastLeads.length} past leads`);
 
     // Step 3: Evaluate with Claude
     console.log('Evaluating prospect with Claude...');
@@ -102,8 +112,28 @@ app.message(async ({ message, say }) => {
     // Step 4: Post result as thread reply
     let replyText = formatEvaluation(evaluation);
 
-    if (evaluation.recommendation === 'RECOMMENDED') {
+    if (Math.round(evaluation.totalScore) >= 3) {
       replyText += `\n\n<!subteam^${SALES_GROUP_ID}> 아웃바운드 검토 부탁드립니다.`;
+    }
+
+    if (pastLeads.length > 0) {
+      const topLeads = pastLeads.slice(0, 10);
+      const summaries = await summarizePastLeads(topLeads);
+      const filtered: string[] = [];
+      for (let i = 0; i < topLeads.length && filtered.length < 5; i++) {
+        const summary = summaries[i] ?? '';
+        if (summary === 'SKIP' || summary === '요약 실패' || !summary) continue;
+        const lead = topLeads[i];
+        const date = new Date(Number(lead.timestamp) * 1000).toLocaleDateString('ko-KR');
+        filtered.push(`\n\n• ${date} #${lead.channel} (<${lead.permalink}|슬랙 링크>)\n  ${summary}`);
+      }
+      if (filtered.length > 0) {
+        replyText += '\n\n---\n\n:mag: *이전 문의 이력*' + filtered.join('');
+      } else {
+        replyText += `\n\n---\n\n:mag: *이전 문의 이력*\n검색 ${pastLeads.length}건 중 세일즈 관련 이력이 없습니다.`;
+      }
+    } else {
+      replyText += '\n\n---\n\n:mag: *이전 문의 이력*\n이전 문의 이력이 없습니다.';
     }
 
     await say({
@@ -114,8 +144,12 @@ app.message(async ({ message, say }) => {
     console.log(`Posted evaluation to thread for ${companyName}`);
   } catch (error) {
     console.error('Evaluation failed:', error);
+    const isQuotaExceeded = error instanceof Error && error.message === 'GOOGLE_QUOTA_EXCEEDED';
+    const errorMessage = isQuotaExceeded
+      ? ':warning: Google 검색 API 일일 한도가 초과되었습니다. 검색 없이 평가할 수 없으므로 수동 확인이 필요합니다.'
+      : ':warning: 프로스펙트 평가 중 오류가 발생했습니다. 수동 확인이 필요합니다.';
     await say({
-      text: ':warning: 프로스펙트 평가 중 오류가 발생했습니다. 수동 확인이 필요합니다.',
+      text: errorMessage,
       thread_ts: ts,
     });
   }
@@ -123,5 +157,5 @@ app.message(async ({ message, say }) => {
 
 (async () => {
   await app.start();
-  console.log('Prospect Evaluator bot is running!');
+  console.log('Lead Qualifier bot is running!');
 })();

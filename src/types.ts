@@ -16,3 +16,10 @@ export interface SearchResult {
   snippet: string;
   link: string;
 }
+
+export interface PastLead {
+  text: string;
+  channel: string;
+  timestamp: string;
+  permalink: string;
+}

@@ -1,5 +1,5 @@
 {
-  "name": "prospect-evaluator",
+  "name": "lead-qualifier",
   "version": "1.0.0",
   "description": "Slack bot that evaluates inbound leads for MayI",
   "main": "dist/index.js",
@@ -13,6 +13,7 @@
     "@anthropic-ai/sdk": "^0.78.0",
     "@aws-sdk/credential-provider-node": "^3.972.17",
     "@slack/bolt": "^4.1.0",
+    "@slack/web-api": "^7.14.1",
     "dotenv": "^16.4.7"
   },
   "devDependencies": {

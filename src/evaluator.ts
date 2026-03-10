@@ -1,6 +1,6 @@
 import AnthropicBedrock from '@anthropic-ai/bedrock-sdk';
 import Anthropic from '@anthropic-ai/sdk';
-import { EvaluationResult, SearchResult } from './types.js';
+import { EvaluationResult, SearchResult, PastLead } from './types.js';
 
 const client = new AnthropicBedrock({
   awsRegion: process.env.AWS_REGION ?? 'ap-northeast-2',
@@ -14,6 +14,7 @@ export async function extractCompanyName(messageText: string): Promise<string | 
       model,
       max_tokens: 256,
       system: `주어진 메시지가 영업 리드(제품/서비스 문의, 도입 상담 요청 등)인지 판단하세요.
+Typeform, Zapier, 리캐치 등 외부 폼/자동화 도구에서 전달된 알림 메시지는 영업 리드로 판단하세요.
 영업 리드가 맞다면 회사명(Company name)만 한 줄로 응답하세요.
 영업 리드가 아니라 일반 대화, 잡담, 공지, 단순 회사 언급 등이면 "없음"이라고 응답하세요.
 회사명을 찾을 수 없는 경우에도 "없음"이라고 응답하세요.`,
@@ -44,17 +45,17 @@ const SYSTEM_PROMPT = `당신은 메이아이(MayI)의 세일즈 프로스펙트
 
 아래 항목별로 1~5점(별점)을 매기세요.
 
-### 1. 매장 수 (가중치 30%)
+### 1. 매장 수 (가중치 35%)
 - 리드가 기입한 매장 수가 있을 경우, 웹 검색 결과와 비교하여 팩트 체크하세요.
 - 검색 결과와 크게 다르면 검색 결과를 우선하세요.
 - 매장 수 정보가 없으면 웹 검색 결과만으로 판단하세요.
-- 5점: 100개 이상
-- 4점: 30~99개
-- 3점: 10~29개
-- 2점: 3~9개
-- 1점: 0~2개 또는 정보 없음
+- 5점: 60개 이상
+- 4점: 40~59개
+- 3점: 20~39개
+- 2점: 5~19개
+- 1점: 0~4개 또는 정보 없음
 
-### 2. 대기업 여부 (가중치 15%)
+### 2. 대기업 여부 (가중치 20%)
 - 5점: 대기업 또는 대기업 계열사
 - 4점: 중견기업
 - 3점: 중소기업이나 성장세 뚜렷
@@ -77,6 +78,7 @@ const SYSTEM_PROMPT = `당신은 메이아이(MayI)의 세일즈 프로스펙트
 - 문화/엔터 (영화관, 공연장, 전시관)
 
 중간 적합성 (2~3점):
+- 광고대행사/마케팅 에이전시 (오프라인 클라이언트 대행, 파트너 채널 가치)
 - F&B (카페, 레스토랑, 프랜차이즈)
 - 금융 (은행 지점, 보험사 영업점)
 - 부동산/건설 (모델하우스, 분양사무소)
@@ -89,12 +91,14 @@ const SYSTEM_PROMPT = `당신은 메이아이(MayI)의 세일즈 프로스펙트
 - B2B SaaS
 - 물류/운송
 
-### 5. 업무 메일 여부 (가중치 10%)
+위 목록에 없는 업종은 메이아이 솔루션(오프라인 방문객 영상 분석)과의 연관성을 종합적으로 판단하여 적절한 점수를 매기세요.
+
+### 5. 업무 메일 여부 (가중치 5%)
 - 5점: 회사 도메인 메일 사용 (예: @company.co.kr)
 - 3점: 메일 정보 없음
 - 1점: 무료 메일 사용 (gmail, naver, hanmail 등)
 
-### 6. 의사결정권 (가중치 10%)
+### 6. 의사결정권 (가중치 5%)
 - 5점: C레벨 (CEO, CTO, CMO 등) 또는 임원
 - 4점: 팀장/부서장급
 - 3점: 매니저/과장급
@@ -107,7 +111,7 @@ const SYSTEM_PROMPT = `당신은 메이아이(MayI)의 세일즈 프로스펙트
 
 ## 종합 점수 계산
 각 항목의 별점에 가중치를 곱하여 합산하세요.
-종합 = (매장수 × 0.30) + (대기업 × 0.15) + (브랜드 × 0.10) + (업종 × 0.25) + (메일 × 0.10) + (의사결정권 × 0.10)
+종합 = (매장수 × 0.35) + (대기업 × 0.20) + (브랜드 × 0.10) + (업종 × 0.25) + (메일 × 0.05) + (의사결정권 × 0.05)
 결과는 소수점 첫째자리까지 표시 (예: 4.2)
 
 ## 추천 기준
@@ -207,5 +211,35 @@ ${searchContext}`;
       return { recommendation: 'NEEDS_REVIEW', totalScore: 0, scores: [], opinion: `API 오류 (${error.status}): ${error.message}` };
     }
     throw error;
+  }
+}
+
+export async function summarizePastLeads(pastLeads: PastLead[]): Promise<string[]> {
+  const leadsText = pastLeads
+    .map((lead, i) => `[${i + 1}] ${lead.text.slice(0, 300)}`)
+    .join('\n\n');
+
+  try {
+    const response = await client.messages.create({
+      model,
+      max_tokens: 1024,
+      system: `주어진 Slack 메시지들을 각각 한 줄로 요약하세요.
+각 메시지가 어떤 성격인지(리드 문의, 봇 평가 결과, 미팅 후기, 일반 대화 등) 알 수 있도록 요약하세요.
+세일즈와 무관한 메시지(일반 대화, 잡담, 공지 등)는 "SKIP"이라고 응답하세요.
+반드시 JSON 배열 형식으로만 응답하세요. 예: ["요약1", "SKIP", "요약3"]`,
+      messages: [{ role: 'user', content: leadsText }],
+    });
+
+    const text = response.content.find((b: { type: string }) => b.type === 'text') as { type: 'text'; text: string } | undefined;
+    const responseText = text?.text ?? '';
+
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return pastLeads.map(() => '요약 실패');
+
+    const parsed = JSON.parse(jsonMatch[0]) as string[];
+    return pastLeads.map((_, i) => parsed[i] ?? '요약 없음');
+  } catch (error) {
+    console.error('Failed to summarize past leads:', error);
+    return pastLeads.map(() => '요약 실패');
   }
 }
