@@ -98,6 +98,12 @@ app.message(async ({ message, say }) => {
   try {
     // 1단계: 회사 정보 추출
     console.log('[1/4] 회사 정보 추출 중...');
+    await app.client.assistant.threads.setStatus({
+      channel_id: message.channel,
+      thread_ts: ts,
+      status: '메시지 분석 중...',
+      loading_messages: ['메시지 분석 중...'],
+    });
     let stepStart = Date.now();
     const companyInfo = await extractCompanyInfo(text);
     if (!companyInfo) {
@@ -106,6 +112,16 @@ app.message(async ({ message, say }) => {
     }
     const { name: companyName, searchQueries } = companyInfo;
     console.log(`[1/4] 회사명: ${companyName}, 검색어: [${searchQueries.join(', ')}] (${formatDuration(Date.now() - stepStart)})`);
+
+    const setStatus = (status: string) =>
+      app.client.assistant.threads.setStatus({
+        channel_id: message.channel,
+        thread_ts: ts,
+        status,
+        loading_messages: [status],
+      });
+
+    await setStatus('회사 정보 검색 및 이전 문의 이력 확인 중...');
 
     // 2단계: 웹 검색 + 이전 이력 검색
     console.log(`[2/4] 검색 중: ${companyName}`);
@@ -116,11 +132,15 @@ app.message(async ({ message, say }) => {
     ]);
     console.log(`[2/4] 웹 검색 ${searchResults.length}건, 이전 이력 ${pastLeads.length}건 (${formatDuration(Date.now() - stepStart)})`);
 
+    await setStatus('리드 평가 중...');
+
     // 3단계: 리드 평가
     console.log('[3/4] 리드 평가 중...');
     stepStart = Date.now();
     const evaluation = await evaluateLead(text, searchResults);
     console.log(`[3/4] 평가 결과: ${evaluation.recommendation} (${evaluation.totalScore}/5.0) (${formatDuration(Date.now() - stepStart)})`);
+
+    await setStatus('평가 결과 정리 중...');
 
     // 4단계: 결과 스레드에 게시
     console.log('[4/4] 결과 정리 및 게시 중...');
