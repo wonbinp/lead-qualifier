@@ -6,38 +6,90 @@ const client = new AnthropicBedrock({
   awsRegion: process.env.AWS_REGION ?? 'ap-northeast-2',
 });
 
-const model = process.env.ANTHROPIC_SMALL_FAST_MODEL ?? 'anthropic.claude-sonnet-4-5-v2-20250929';
+const MODEL_NAME = ['Opus 4.6', 'Sonnet 4.6', 'Haiku 4.5'] as const;
+const MODELS = [
+  'arn:aws:bedrock:ap-northeast-2:151597613659:application-inference-profile/7g9sl6ee3h24',  // Opus 4.6
+  'arn:aws:bedrock:ap-northeast-2:151597613659:application-inference-profile/wchx7rh9y12x',  // Sonnet 4.6
+  'arn:aws:bedrock:ap-northeast-2:151597613659:application-inference-profile/w97tk4ji65z1',  // Haiku 4.5
+];
 
-export async function extractCompanyName(messageText: string): Promise<string | null> {
+async function callClaude(params: { system: string; messages: { role: 'user'; content: string }[]; max_tokens: number }) {
+  for (let i = 0; i < MODELS.length; i++) {
+    try {
+      console.log(`  [모델] ${MODEL_NAME[i]} 사용`);
+      return await client.messages.create({ model: MODELS[i], ...params });
+    } catch (error) {
+      if (error instanceof Anthropic.RateLimitError && i < MODELS.length - 1) {
+        console.log(`  [모델] ${MODEL_NAME[i]} 한도 초과 → ${MODEL_NAME[i + 1]}로 전환`);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error('모든 모델 호출 실패');
+}
+
+export interface CompanyInfo {
+  name: string;
+  searchQueries: string[];
+}
+
+export async function extractCompanyInfo(messageText: string): Promise<CompanyInfo | null> {
   try {
-    const response = await client.messages.create({
-      model,
+    const response = await callClaude({
       max_tokens: 256,
       system: `주어진 메시지가 영업 리드(제품/서비스 문의, 도입 상담 요청 등)인지 판단하세요.
 Typeform, Zapier, 리캐치 등 외부 폼/자동화 도구에서 전달된 알림 메시지는 영업 리드로 판단하세요.
-영업 리드가 맞다면 회사명(Company name)만 한 줄로 응답하세요.
 영업 리드가 아니라 일반 대화, 잡담, 공지, 단순 회사 언급 등이면 "없음"이라고 응답하세요.
-회사명을 찾을 수 없는 경우에도 "없음"이라고 응답하세요.`,
+회사명을 찾을 수 없는 경우에도 "없음"이라고 응답하세요.
+
+영업 리드가 맞다면 반드시 아래 JSON 형식으로 응답하세요:
+{"name": "원본 회사명", "searchQueries": ["검색변형1", "검색변형2"]}
+
+규칙:
+- name: 메시지에 있는 원본 회사명 (법인격 표기 제거). 예: "(주)세라젬" → "세라젬"
+- searchQueries: 슬랙에서 이전 이력을 검색할 때 사용할 변형 목록 (중복 없이, 최대 3개)
+  - 가장 정확한 검색어를 첫 번째에 배치하세요 (정확한 이름 → 축약/변형 순서)
+  - 법인격 표기((주), (사), (재), 주식회사 등)를 제거한 이름
+  - 부가 설명(조직위원회, 코리아, 홀딩스 등)을 제거한 핵심 브랜드명
+  - 원본 이름이 이미 충분히 짧으면 변형을 추가하지 마세요
+  예: "(사)부산비엔날레조직위원회" → {"name": "부산비엔날레조직위원회", "searchQueries": ["부산비엔날레조직위원회", "부산비엔날레"]}
+  예: "(주)세라젬" → {"name": "세라젬", "searchQueries": ["세라젬"]}`,
       messages: [{ role: 'user', content: messageText }],
     });
 
     const text = response.content.find((b: { type: string }) => b.type === 'text') as { type: 'text'; text: string } | undefined;
-    const companyName = text?.text?.trim() ?? '';
+    const responseText = text?.text?.trim() ?? '';
 
-    if (!companyName || companyName === '없음') return null;
-    return companyName;
+    if (!responseText || responseText === '없음') return null;
+
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      // 이전처럼 단순 텍스트로 응답한 경우 fallback
+      if (responseText !== '없음') return { name: responseText, searchQueries: [responseText] };
+      return null;
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!parsed.name) return null;
+
+    const queries: string[] = Array.isArray(parsed.searchQueries) && parsed.searchQueries.length > 0
+      ? parsed.searchQueries
+      : [parsed.name];
+
+    return { name: parsed.name, searchQueries: queries };
   } catch (error) {
-    console.error('Failed to extract company name:', error);
+    console.error('[오류] 회사 정보 추출 실패:', error);
     return null;
   }
 }
 
-const SYSTEM_PROMPT = `당신은 메이아이(MayI)의 세일즈 프로스펙트 평가 전문가입니다.
+const SYSTEM_PROMPT = `당신은 메이아이(mAy-I)의 세일즈 리드 평가 전문가입니다.
 
 메이아이는 AI 영상 분석 솔루션을 제공하는 회사로, 오프라인 공간의 방문객 행동을 분석하여 비즈니스 인사이트를 제공합니다.
 
 ## 당신의 역할
-주어진 리드 메시지 원문과 웹 검색 결과를 바탕으로 프로스펙트를 평가합니다.
+주어진 리드 메시지 원문과 웹 검색 결과를 바탕으로 리드를 평가합니다.
 리드 메시지는 Zapier, Typeform, 리캐치 등 다양한 소스에서 올 수 있으며, 형식이 다를 수 있습니다.
 메시지에서 필요한 정보(회사명, 직책, 매장 수, 이메일, 전화 상담 희망 여부 등)를 직접 파악하세요.
 
@@ -152,8 +204,7 @@ ${messageText}
 ${searchContext}`;
 
   try {
-    const response = await client.messages.create({
-      model,
+    const response = await callClaude({
       max_tokens: 2048,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userMessage }],
@@ -204,10 +255,10 @@ ${searchContext}`;
     };
   } catch (error) {
     if (error instanceof Anthropic.RateLimitError) {
-      console.error('Claude API rate limited - will retry later');
+      console.error('[오류] Claude API 호출 제한 - 잠시 후 재시도 필요');
       return { recommendation: 'NEEDS_REVIEW', totalScore: 0, scores: [], opinion: 'API 호출 제한으로 평가를 완료하지 못했습니다.' };
     } else if (error instanceof Anthropic.APIError) {
-      console.error(`Claude API error ${error.status}:`, error.message);
+      console.error(`[오류] Claude API 오류 ${error.status}:`, error.message);
       return { recommendation: 'NEEDS_REVIEW', totalScore: 0, scores: [], opinion: `API 오류 (${error.status}): ${error.message}` };
     }
     throw error;
@@ -220,13 +271,11 @@ export async function summarizePastLeads(pastLeads: PastLead[]): Promise<string[
     .join('\n\n');
 
   try {
-    const response = await client.messages.create({
-      model,
+    const response = await callClaude({
       max_tokens: 1024,
       system: `주어진 Slack 메시지들을 각각 한 줄로 요약하세요.
 각 메시지가 어떤 성격인지(리드 문의, 봇 평가 결과, 미팅 후기, 일반 대화 등) 알 수 있도록 요약하세요.
-세일즈와 무관한 메시지(일반 대화, 잡담, 공지 등)는 "SKIP"이라고 응답하세요.
-반드시 JSON 배열 형식으로만 응답하세요. 예: ["요약1", "SKIP", "요약3"]`,
+반드시 JSON 배열 형식으로만 응답하세요. 예: ["요약1", "요약2", "요약3"]`,
       messages: [{ role: 'user', content: leadsText }],
     });
 
@@ -239,7 +288,7 @@ export async function summarizePastLeads(pastLeads: PastLead[]): Promise<string[
     const parsed = JSON.parse(jsonMatch[0]) as string[];
     return pastLeads.map((_, i) => parsed[i] ?? '요약 없음');
   } catch (error) {
-    console.error('Failed to summarize past leads:', error);
+    console.error('[오류] 이전 이력 요약 실패:', error);
     return pastLeads.map(() => '요약 실패');
   }
 }

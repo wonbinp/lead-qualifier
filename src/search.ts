@@ -9,43 +9,49 @@ const SEARCH_QUERIES = [
   (name: string) => `"${name}" 기업규모 OR 매출 OR 직원수`,
 ];
 
-async function fetchSearch(query: string): Promise<SearchResult[]> {
+async function fetchSearch(query: string): Promise<{ results: SearchResult[]; quotaExceeded: boolean }> {
   const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${GOOGLE_CSE_ID}&q=${encodeURIComponent(query)}&num=10`;
 
   try {
     const response = await fetch(url);
-    if (response.status === 429) {
-      console.error('Google Search API 일일 한도 초과');
-      throw new Error('GOOGLE_QUOTA_EXCEEDED');
+    if (response.status === 429 || response.status === 403) {
+      return { results: [], quotaExceeded: true };
     }
     if (!response.ok) {
-      console.error(`Google Search API error: ${response.status} ${response.statusText}`);
-      return [];
+      console.error(`[웹 검색] API 오류: ${response.status} ${response.statusText}`);
+      return { results: [], quotaExceeded: false };
     }
 
     const data = await response.json();
 
     if (!data.items || !Array.isArray(data.items)) {
-      return [];
+      return { results: [], quotaExceeded: false };
     }
 
-    return data.items.map((item: { title?: string; snippet?: string; link?: string }) => ({
-      title: item.title ?? '',
-      snippet: item.snippet ?? '',
-      link: item.link ?? '',
-    }));
+    return {
+      results: data.items.map((item: { title?: string; snippet?: string; link?: string }) => ({
+        title: item.title ?? '',
+        snippet: item.snippet ?? '',
+        link: item.link ?? '',
+      })),
+      quotaExceeded: false,
+    };
   } catch (error) {
-    console.error(`Failed to search "${query}":`, error);
-    return [];
+    console.error(`[웹 검색] "${query}" 검색 실패:`, error);
+    return { results: [], quotaExceeded: false };
   }
 }
 
 export async function searchCompany(companyName: string): Promise<SearchResult[]> {
   const queries = SEARCH_QUERIES.map((q) => q(companyName));
-  const results = await Promise.all(queries.map(fetchSearch));
-  const all = results.flat();
+  const responses = await Promise.all(queries.map(fetchSearch));
 
-  // 링크 기준으로 중복 제거
+  if (responses.some((r) => r.quotaExceeded)) {
+    console.error('[웹 검색] Google Search API 일일 한도 초과');
+  }
+
+  const all = responses.flatMap((r) => r.results);
+
   const seen = new Set<string>();
   return all.filter((item) => {
     if (seen.has(item.link)) return false;
