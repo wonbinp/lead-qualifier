@@ -1,6 +1,6 @@
 import AnthropicBedrock from '@anthropic-ai/bedrock-sdk';
 import Anthropic from '@anthropic-ai/sdk';
-import { EvaluationResult, SearchResult, PastLead } from './types.js';
+import { EvaluationResult, PastLead } from './types.js';
 
 const client = new AnthropicBedrock({
   awsRegion: process.env.AWS_REGION ?? 'ap-northeast-2',
@@ -89,7 +89,7 @@ const SYSTEM_PROMPT = `당신은 메이아이(mAy-I)의 세일즈 리드 평가 
 메이아이는 AI 영상 분석 솔루션을 제공하는 회사로, 오프라인 공간의 방문객 행동을 분석하여 비즈니스 인사이트를 제공합니다.
 
 ## 당신의 역할
-주어진 리드 메시지 원문과 웹 검색 결과를 바탕으로 리드를 평가합니다.
+주어진 리드 메시지 원문과 당신이 알고 있는 기업 정보를 바탕으로 리드를 평가합니다.
 리드 메시지는 Zapier, Typeform, 리캐치 등 다양한 소스에서 올 수 있으며, 형식이 다를 수 있습니다.
 메시지에서 필요한 정보(회사명, 직책, 매장 수, 이메일, 전화 상담 희망 여부 등)를 직접 파악하세요.
 
@@ -98,9 +98,9 @@ const SYSTEM_PROMPT = `당신은 메이아이(mAy-I)의 세일즈 리드 평가 
 아래 항목별로 1~5점(별점)을 매기세요.
 
 ### 1. 매장 수 (가중치 35%)
-- 리드가 기입한 매장 수가 있을 경우, 웹 검색 결과와 비교하여 팩트 체크하세요.
-- 검색 결과와 크게 다르면 검색 결과를 우선하세요.
-- 매장 수 정보가 없으면 웹 검색 결과만으로 판단하세요.
+- 리드가 기입한 매장 수가 있을 경우, 당신이 알고 있는 정보와 비교하여 팩트 체크하세요.
+- 당신이 알고 있는 정보와 크게 다르면 당신이 알고 있는 정보를 우선하세요.
+- 매장 수 정보가 없으면 당신이 알고 있는 정보로 판단하세요.
 - 5점: 60개 이상
 - 4점: 40~59개
 - 3점: 20~39개
@@ -189,19 +189,11 @@ const SYSTEM_PROMPT = `당신은 메이아이(mAy-I)의 세일즈 리드 평가 
 
 export async function evaluateLead(
   messageText: string,
-  searchResults: SearchResult[],
 ): Promise<EvaluationResult> {
-  const searchContext = searchResults.length > 0
-    ? searchResults.map(r => `- ${r.title}: ${r.snippet}`).join('\n')
-    : '검색 결과 없음';
-
   const userMessage = `다음 리드 메시지를 평가해주세요.
 
 ## 리드 메시지 원문
-${messageText}
-
-## 웹 검색 결과
-${searchContext}`;
+${messageText}`;
 
   try {
     const response = await callClaude({
@@ -274,7 +266,7 @@ export async function summarizePastLeads(pastLeads: PastLead[]): Promise<string[
     const response = await callClaude({
       max_tokens: 1024,
       system: `주어진 Slack 메시지들을 각각 한 줄로 요약하세요.
-각 메시지가 어떤 성격인지(리드 문의, 봇 평가 결과, 미팅 후기, 일반 대화 등) 알 수 있도록 요약하세요.
+각 메시지가 어떤 성격인지(리드 문의, 미팅 후기, 참고 언급, 일반 대화 등) 알 수 있도록 요약하세요.
 반드시 JSON 배열 형식으로만 응답하세요. 예: ["요약1", "요약2", "요약3"]`,
       messages: [{ role: 'user', content: leadsText }],
     });

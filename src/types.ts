@@ -11,12 +11,6 @@ export interface EvaluationResult {
   opinion: string;
 }
 
-export interface SearchResult {
-  title: string;
-  snippet: string;
-  link: string;
-}
-
 export interface PastLead {
   text: string;
   channel: string;

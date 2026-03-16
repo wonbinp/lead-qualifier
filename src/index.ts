@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { App } from '@slack/bolt';
-import { searchCompany } from './search.js';
 import { extractCompanyInfo, evaluateLead, summarizePastLeads } from './evaluator.js';
 import { searchPastLeads } from './history.js';
 import { ScoreItem, EvaluationResult } from './types.js';
@@ -8,8 +7,7 @@ import { ScoreItem, EvaluationResult } from './types.js';
 const REQUIRED_ENV_VARS = [
   'SLACK_BOT_TOKEN',
   'SLACK_APP_TOKEN',
-  'GOOGLE_API_KEY',
-  'GOOGLE_CSE_ID',
+  'SLACK_USER_TOKEN',
   'SLACK_CHANNEL_ID',
   'SALES_GROUP_ID',
 ] as const;
@@ -82,16 +80,12 @@ function formatEvaluation(evaluation: EvaluationResult): string {
   return lines.join('\n');
 }
 
-app.message(async ({ message, say }) => {
-  if (!('channel' in message) || message.channel !== SLACK_CHANNEL_ID) return;
-  if ('thread_ts' in message && message.thread_ts !== message.ts) return;
-
-  const text = ('text' in message ? message.text : '') ?? '';
-  if (!text.trim()) return;
-
-  const ts = ('ts' in message ? message.ts : undefined) as string | undefined;
-  if (!ts) return;
-
+async function processLead(
+  messageText: string,
+  channel: string,
+  threadTs: string,
+  replyFn: (text: string) => Promise<void>,
+) {
   const startTime = Date.now();
   console.log(`\n[${new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}] ━━━ 새 메시지 감지 ━━━`);
 
@@ -99,13 +93,13 @@ app.message(async ({ message, say }) => {
     // 1단계: 회사 정보 추출
     console.log('[1/4] 회사 정보 추출 중...');
     await app.client.assistant.threads.setStatus({
-      channel_id: message.channel,
-      thread_ts: ts,
+      channel_id: channel,
+      thread_ts: threadTs,
       status: '메시지 분석 중...',
       loading_messages: ['메시지 분석 중...'],
     });
     let stepStart = Date.now();
-    const companyInfo = await extractCompanyInfo(text);
+    const companyInfo = await extractCompanyInfo(messageText);
     if (!companyInfo) {
       console.log('[1/4] 회사명을 추출할 수 없어 건너뜁니다.');
       return;
@@ -115,29 +109,26 @@ app.message(async ({ message, say }) => {
 
     const setStatus = (status: string) =>
       app.client.assistant.threads.setStatus({
-        channel_id: message.channel,
-        thread_ts: ts,
+        channel_id: channel,
+        thread_ts: threadTs,
         status,
         loading_messages: [status],
       });
 
-    await setStatus('회사 정보 검색 및 이전 문의 이력 확인 중...');
+    await setStatus('이전 문의 이력 확인 중...');
 
-    // 2단계: 웹 검색 + 이전 이력 검색
-    console.log(`[2/4] 검색 중: ${companyName}`);
+    // 2단계: 이전 이력 검색
+    console.log(`[2/4] 이전 이력 검색 중: ${companyName}`);
     stepStart = Date.now();
-    const [searchResults, pastLeads] = await Promise.all([
-      searchCompany(companyName),
-      searchPastLeads(searchQueries, ts),
-    ]);
-    console.log(`[2/4] 웹 검색 ${searchResults.length}건, 이전 이력 ${pastLeads.length}건 (${formatDuration(Date.now() - stepStart)})`);
+    const pastLeads = await searchPastLeads(searchQueries, threadTs);
+    console.log(`[2/4] 이전 이력 ${pastLeads.length}건 (${formatDuration(Date.now() - stepStart)})`);
 
     await setStatus('리드 평가 중...');
 
     // 3단계: 리드 평가
     console.log('[3/4] 리드 평가 중...');
     stepStart = Date.now();
-    const evaluation = await evaluateLead(text, searchResults);
+    const evaluation = await evaluateLead(messageText);
     console.log(`[3/4] 평가 결과: ${evaluation.recommendation} (${evaluation.totalScore}/5.0) (${formatDuration(Date.now() - stepStart)})`);
 
     await setStatus('평가 결과 정리 중...');
@@ -166,18 +157,69 @@ app.message(async ({ message, say }) => {
       replyText += '\n\n---\n\n:mag: *이전 문의 이력*\n이전 문의 이력이 없습니다.';
     }
 
-    await say({
-      text: replyText,
-      thread_ts: ts,
-    });
+    await replyFn(replyText);
 
     console.log(`[4/4] ${companyName} 평가 결과 게시 완료 (${formatDuration(Date.now() - stepStart)})`);
     console.log(`━━━ 전체 소요 시간: ${formatDuration(Date.now() - startTime)} ━━━\n`);
   } catch (error) {
     console.error('[오류] 평가 실패:', error);
-    await say({
-      text: ':warning: 리드 평가 중 오류가 발생했습니다. 수동 확인이 필요합니다.',
-      thread_ts: ts,
+    await replyFn(':warning: 리드 평가 중 오류가 발생했습니다. 수동 확인이 필요합니다.');
+  }
+}
+
+// 채널에 새 메시지가 올 때 자동 평가
+app.message(async ({ message, say }) => {
+  if (!('channel' in message) || message.channel !== SLACK_CHANNEL_ID) return;
+  if ('thread_ts' in message && message.thread_ts !== message.ts) return;
+
+  const text = ('text' in message ? message.text : '') ?? '';
+  if (!text.trim()) return;
+
+  const ts = ('ts' in message ? message.ts : undefined) as string | undefined;
+  if (!ts) return;
+
+  await processLead(text, message.channel, ts, (replyText) =>
+    say({ text: replyText, thread_ts: ts }).then(() => {}),
+  );
+});
+
+// 메시지에 🔍 이모지를 달면 해당 메시지를 평가
+app.event('reaction_added', async ({ event }) => {
+  if (event.reaction !== 'mag') return;
+
+  try {
+    const result = await app.client.conversations.history({
+      channel: event.item.channel,
+      latest: event.item.ts,
+      inclusive: true,
+      limit: 1,
+    });
+
+    const message = result.messages?.[0];
+    const messageText = message?.text?.trim();
+    if (!messageText) {
+      await app.client.chat.postMessage({
+        channel: event.item.channel,
+        text: '메시지의 텍스트를 가져올 수 없습니다.',
+        thread_ts: event.item.ts,
+      });
+      return;
+    }
+
+    console.log(`\n[이모지] #${event.item.channel} 에서 평가 요청`);
+    await processLead(messageText, event.item.channel, event.item.ts, (replyText) =>
+      app.client.chat.postMessage({
+        channel: event.item.channel,
+        text: replyText,
+        thread_ts: event.item.ts,
+      }).then(() => {}),
+    );
+  } catch (error) {
+    console.error('[오류] 이모지 평가 실패:', error);
+    await app.client.chat.postMessage({
+      channel: event.item.channel,
+      text: ':warning: 리드 평가 중 오류가 발생했습니다.',
+      thread_ts: event.item.ts,
     });
   }
 });
