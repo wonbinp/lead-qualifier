@@ -40,7 +40,7 @@ const RECOMMENDATION_LABEL: Record<string, string> = {
 };
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
+  if (ms < 1000) return `${(ms / 1000).toFixed(1)}초`;
   const seconds = ms / 1000;
   if (seconds < 60) return `${seconds.toFixed(1)}초`;
   const minutes = Math.floor(seconds / 60);
@@ -100,12 +100,13 @@ async function processLead(
     });
     let stepStart = Date.now();
     const companyInfo = await extractCompanyInfo(messageText);
-    if (!companyInfo) {
-      console.log('[1/4] 회사명을 추출할 수 없어 건너뜁니다.');
-      return;
+    const companyName = companyInfo?.name ?? null;
+    const searchQueries = companyInfo?.searchQueries ?? [];
+    if (companyName) {
+      console.log(`[1/4] 회사명: ${companyName}, 검색어: [${searchQueries.join(', ')}] (${formatDuration(Date.now() - stepStart)})`);
+    } else {
+      console.log(`[1/4] 회사명을 추출할 수 없으나 평가는 계속 진행합니다. (${formatDuration(Date.now() - stepStart)})`);
     }
-    const { name: companyName, searchQueries } = companyInfo;
-    console.log(`[1/4] 회사명: ${companyName}, 검색어: [${searchQueries.join(', ')}] (${formatDuration(Date.now() - stepStart)})`);
 
     const setStatus = (status: string) =>
       app.client.assistant.threads.setStatus({
@@ -115,13 +116,17 @@ async function processLead(
         loading_messages: [status],
       });
 
-    await setStatus('이전 문의 이력 확인 중...');
-
-    // 2단계: 이전 이력 검색
-    console.log(`[2/4] 이전 이력 검색 중: ${companyName}`);
-    stepStart = Date.now();
-    const pastLeads = await searchPastLeads(searchQueries, threadTs);
-    console.log(`[2/4] 이전 이력 ${pastLeads.length}건 (${formatDuration(Date.now() - stepStart)})`);
+    // 2단계: 이전 이력 검색 (회사명이 있을 때만)
+    let pastLeads: Awaited<ReturnType<typeof searchPastLeads>> = [];
+    if (searchQueries.length > 0) {
+      await setStatus('이전 문의 이력 확인 중...');
+      console.log(`[2/4] 이전 이력 검색 중: ${companyName}`);
+      stepStart = Date.now();
+      pastLeads = await searchPastLeads(searchQueries, threadTs);
+      console.log(`[2/4] 이전 이력 ${pastLeads.length}건 (${formatDuration(Date.now() - stepStart)})`);
+    } else {
+      console.log('[2/4] 회사명 없음 → 이전 이력 검색 생략');
+    }
 
     await setStatus('리드 평가 중...');
 
@@ -167,20 +172,81 @@ async function processLead(
   }
 }
 
-// 채널에 새 메시지가 올 때 자동 평가
-app.message(async ({ message, say }) => {
-  if (!('channel' in message) || message.channel !== SLACK_CHANNEL_ID) return;
-  if ('thread_ts' in message && message.thread_ts !== message.ts) return;
+// 채널에 새 메시지가 올 때 자동 평가 (봇 메시지 포함)
+app.event('message', async ({ event }) => {
+  if (event.channel !== SLACK_CHANNEL_ID) return;
+  if ('thread_ts' in event && event.thread_ts !== event.ts) return;
 
-  const text = ('text' in message ? message.text : '') ?? '';
+  const text = ('text' in event ? event.text : '') ?? '';
   if (!text.trim()) return;
 
-  const ts = ('ts' in message ? message.ts : undefined) as string | undefined;
+  const ts = event.ts;
   if (!ts) return;
 
-  await processLead(text, message.channel, ts, (replyText) =>
-    say({ text: replyText, thread_ts: ts }).then(() => {}),
+  await processLead(text, event.channel, ts, (replyText) =>
+    app.client.chat.postMessage({
+      channel: event.channel,
+      text: replyText,
+      thread_ts: ts,
+    }).then(() => {}),
   );
+});
+
+// 봇을 멘션하면 스레드 전체 컨텍스트를 수집하여 평가
+app.event('app_mention', async ({ event }) => {
+  const channel = event.channel;
+  const threadTs = event.thread_ts; // 스레드 안에서 멘션된 경우
+
+  try {
+    let targetText: string;
+    let replyTs: string;
+
+    if (threadTs) {
+      // 스레드 안에서 멘션 → 스레드 전체 메시지를 수집하여 평가
+      const replies = await app.client.conversations.replies({
+        channel,
+        ts: threadTs,
+        limit: 50,
+      });
+      const messages = (replies.messages ?? [])
+        .filter((m) => !m.bot_id) // 봇 메시지 제외
+        .map((m) => (m.text ?? '').replace(/<@[A-Z0-9]+>/g, '').trim())
+        .filter((t) => t.length > 0);
+
+      targetText = messages.join('\n\n');
+      replyTs = threadTs;
+    } else {
+      // 채널에서 직접 멘션 → 멘션 메시지 자체에서 봇 태그를 제거한 텍스트를 평가
+      targetText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
+      replyTs = event.ts;
+    }
+
+    if (!targetText) {
+      await app.client.chat.postMessage({
+        channel,
+        text: '평가할 메시지 내용이 없습니다. 스레드에서 멘션하거나, 멘션과 함께 평가할 내용을 입력해주세요.',
+        thread_ts: replyTs,
+      });
+      return;
+    }
+
+    console.log(`\n[멘션] #${channel} 에서 평가 요청${threadTs ? ' (스레드)' : ''}`);
+    await processLead(targetText, channel, replyTs, (replyText) =>
+      app.client.chat.postMessage({
+        channel,
+        text: replyText,
+        thread_ts: replyTs,
+      }).then(() => {}),
+    );
+  } catch (error) {
+    console.error('[오류] 멘션 평가 실패:', error);
+    const replyTs = threadTs ?? event.ts;
+    await app.client.chat.postMessage({
+      channel,
+      text: ':warning: 리드 평가 중 오류가 발생했습니다.',
+      thread_ts: replyTs,
+    });
+  }
 });
 
 // 메시지에 🔍 이모지를 달면 해당 메시지를 평가
